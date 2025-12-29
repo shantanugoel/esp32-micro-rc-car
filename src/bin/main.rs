@@ -67,11 +67,11 @@ async fn main(spawner: Spawner) -> ! {
     let mut led = Ws2812::new(peripherals.RMT, peripherals.GPIO21);
 
     // ========== MOTOR PWM TEST ==========
-    // Using Driver 1, Channel A (Left-Front motor):
+    // Using TB6612FNG Channel A (Left motors):
     // - PWMA → GPIO1 (PWM speed control)
-    // - AIN1 → GPIO2 (direction)
-    // - AIN2 → GPIO3 (direction)
-    // - STBY → GPIO13 (enable driver)
+    // - AIN2 → GPIO2 (direction)
+    // - AIN1 → GPIO3 (direction)
+    // - STBY → GPIO14 (enable driver)
 
     info!("Setting up motor PWM test...");
 
@@ -86,17 +86,17 @@ async fn main(spawner: Spawner) -> ! {
     let pwm_channel =
         motor::configure_channel(&ledc, channel::Number::Channel0, peripherals.GPIO1, &timer0);
 
-    // Create motor with direction pins
-    let in1 = motor::output_pin(peripherals.GPIO2);
-    let in2 = motor::output_pin(peripherals.GPIO3);
-    let mut motor_lf = Motor::new(in1, in2, pwm_channel);
+    // Create motor with direction pins (AIN1=GPIO3, AIN2=GPIO2)
+    let in1 = motor::output_pin(peripherals.GPIO3);
+    let in2 = motor::output_pin(peripherals.GPIO2);
+    let mut motor_left = Motor::new(in1, in2, pwm_channel);
 
     // Enable motor driver via STBY pin
-    let mut stby = StandbyPin::new(peripherals.GPIO13);
+    let mut stby = StandbyPin::new(peripherals.GPIO14);
     stby.enable();
 
-    info!("Motor test starting - connect motor to Driver 1 Channel A");
-    info!("Pins: PWM=GPIO1, IN1=GPIO2, IN2=GPIO3, STBY=GPIO13");
+    info!("Motor test starting - connect left motors to Channel A");
+    info!("Pins: PWMA=GPIO1, AIN2=GPIO2, AIN1=GPIO3, STBY=GPIO14");
 
     // LED indicates test state
     led.set_color(Color::green(10)).await;
@@ -105,9 +105,9 @@ async fn main(spawner: Spawner) -> ! {
         // Test: Ramp up forward
         info!("Forward: ramping up 0->100%%");
         led.set_color(Color::green(25)).await;
-        motor_lf.set_direction(Direction::Forward);
+        motor_left.set_direction(Direction::Forward);
         for speed in (0..=100).step_by(10) {
-            motor_lf.set_speed(speed);
+            motor_left.set_speed(speed);
             info!("  Speed: {}%%", speed);
             Timer::after(Duration::from_millis(200)).await;
         }
@@ -117,7 +117,7 @@ async fn main(spawner: Spawner) -> ! {
         // Test: Ramp down forward
         info!("Forward: ramping down 100->0%%");
         for speed in (0..=100).rev().step_by(10) {
-            motor_lf.set_speed(speed);
+            motor_left.set_speed(speed);
             info!("  Speed: {}%%", speed);
             Timer::after(Duration::from_millis(200)).await;
         }
@@ -125,15 +125,15 @@ async fn main(spawner: Spawner) -> ! {
         // Brake
         info!("Brake");
         led.set_color(Color::red(25)).await;
-        motor_lf.brake();
+        motor_left.brake();
         Timer::after(Duration::from_millis(1000)).await;
 
         // Test: Ramp up reverse
         info!("Reverse: ramping up 0->100%%");
         led.set_color(Color::blue(25)).await;
-        motor_lf.set_direction(Direction::Reverse);
+        motor_left.set_direction(Direction::Reverse);
         for speed in (0..=100).step_by(10) {
-            motor_lf.set_speed(speed);
+            motor_left.set_speed(speed);
             info!("  Speed: {}%%", speed);
             Timer::after(Duration::from_millis(200)).await;
         }
@@ -143,7 +143,7 @@ async fn main(spawner: Spawner) -> ! {
         // Test: Ramp down reverse
         info!("Reverse: ramping down 100->0%%");
         for speed in (0..=100).rev().step_by(10) {
-            motor_lf.set_speed(speed);
+            motor_left.set_speed(speed);
             info!("  Speed: {}%%", speed);
             Timer::after(Duration::from_millis(200)).await;
         }
@@ -151,7 +151,7 @@ async fn main(spawner: Spawner) -> ! {
         // Coast stop
         info!("Coast stop");
         led.set_color(Color::off()).await;
-        motor_lf.stop();
+        motor_left.stop();
         Timer::after(Duration::from_millis(2000)).await;
 
         info!("--- Test cycle complete, repeating ---");
