@@ -14,6 +14,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::ble::controller::BleConnector;
+use esp32_micro_rc_car::led::{Color, Ws2812};
 use trouble_host::prelude::*;
 use {esp_backtrace as _, esp_println as _};
 
@@ -60,9 +61,25 @@ async fn main(spawner: Spawner) -> ! {
     // TODO: Spawn some tasks
     let _ = spawner;
 
+    // Initialize WS2812B LED on GPIO21
+    let mut led = Ws2812::new(peripherals.RMT, peripherals.GPIO21);
+
     loop {
-        info!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
+        info!("LED RED");
+        led.set_color(Color::red(25)).await;
+        Timer::after(Duration::from_millis(500)).await;
+
+        info!("LED GREEN");
+        led.set_color(Color::green(25)).await;
+        Timer::after(Duration::from_millis(500)).await;
+
+        info!("LED BLUE");
+        led.set_color(Color::blue(25)).await;
+        Timer::after(Duration::from_millis(500)).await;
+
+        info!("LED OFF");
+        led.off().await;
+        Timer::after(Duration::from_millis(500)).await;
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
