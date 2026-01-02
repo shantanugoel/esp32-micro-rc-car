@@ -13,6 +13,7 @@ use core::cell::RefCell;
 use defmt::{debug, error, info};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
@@ -21,8 +22,7 @@ use esp_hal::ledc::{LSGlobalClkSource, Ledc, channel, timer};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::ble::controller::BleConnector;
 use esp32_micro_rc_car::ble::{
-    CommandFlags, GamepadState, HID_REPORT_UUID, MotorCommand, gamepad_to_motor_cmd,
-    parse_generic_gamepad,
+    CommandFlags, GamepadState, MotorCommand, gamepad_to_motor_cmd, parse_generic_gamepad,
 };
 use esp32_micro_rc_car::controller::{DriveTrain, TurnConfig};
 use esp32_micro_rc_car::led::{Color, Ws2812};
@@ -42,9 +42,137 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// Channel for motor commands
 static MOTOR_CMD_CHANNEL: Channel<CriticalSectionRawMutex, MotorCommand, 4> = Channel::new();
 
+/// Channel for LED status updates
+static LED_STATUS_CHANNEL: Channel<CriticalSectionRawMutex, LedStatus, 4> = Channel::new();
+
+/// LED status states
+#[derive(Clone, Copy, Debug)]
+enum LedStatus {
+    /// Boot/startup - white
+    Booting,
+    /// Motors ready, waiting for BLE - cyan pulse
+    MotorsReady,
+    /// Scanning for gamepad - blue blink
+    Scanning,
+    /// Connecting to gamepad - yellow blink
+    Connecting,
+    /// Connected and ready - solid green
+    Connected,
+    /// Disconnected - red blink
+    Disconnected,
+    /// Raw input received (debug) - magenta flash
+    InputReceived,
+    /// Receiving input - color based on motor speed
+    Driving {
+        left: i8,
+        right: i8,
+    },
+    /// Emergency stop - solid red
+    EmergencyStop,
+    /// Special turn - purple/yellow
+    TurnLeft,
+    TurnRight,
+}
+
 static LEDC_CELL: StaticCell<Ledc<'static>> = StaticCell::new();
 static TIMER0_CELL: StaticCell<timer::Timer<'static, esp_hal::ledc::LowSpeed>> = StaticCell::new();
 static TIMER1_CELL: StaticCell<timer::Timer<'static, esp_hal::ledc::LowSpeed>> = StaticCell::new();
+
+/// LED status task - handles blinking patterns and status display
+#[allow(
+    clippy::large_stack_frames,
+    reason = "async task with awaits needs stack space"
+)]
+#[embassy_executor::task]
+async fn led_status_task(mut led: Ws2812<'static>) {
+    info!("LED status task started");
+    let mut current_status = LedStatus::Booting;
+    let mut blink_on = true;
+
+    // Initial boot color
+    led.set_color(Color::new(20, 20, 20)).await; // White
+
+    loop {
+        // Check for new status (non-blocking)
+        if let Ok(new_status) = LED_STATUS_CHANNEL.try_receive() {
+            current_status = new_status;
+            blink_on = true; // Reset blink state on status change
+        }
+
+        match current_status {
+            LedStatus::Booting => {
+                led.set_color(Color::new(20, 20, 20)).await; // White
+            }
+            LedStatus::MotorsReady => {
+                // Cyan pulse
+                let intensity = if blink_on { 20 } else { 5 };
+                led.set_color(Color::new(0, intensity, intensity)).await;
+                blink_on = !blink_on;
+            }
+            LedStatus::Scanning => {
+                // Blue blink (fast)
+                if blink_on {
+                    led.set_color(Color::new(0, 0, 30)).await;
+                } else {
+                    led.set_color(Color::new(0, 0, 5)).await;
+                }
+                blink_on = !blink_on;
+            }
+            LedStatus::Connecting => {
+                // Yellow blink
+                if blink_on {
+                    led.set_color(Color::new(30, 20, 0)).await;
+                } else {
+                    led.set_color(Color::new(5, 3, 0)).await;
+                }
+                blink_on = !blink_on;
+            }
+            LedStatus::Connected => {
+                // Solid green
+                led.set_color(Color::green(20)).await;
+            }
+            LedStatus::Disconnected => {
+                // Red blink
+                if blink_on {
+                    led.set_color(Color::red(30)).await;
+                } else {
+                    led.set_color(Color::new(0, 0, 0)).await;
+                }
+                blink_on = !blink_on;
+            }
+            LedStatus::InputReceived => {
+                // Magenta flash for raw input debug
+                led.set_color(Color::new(40, 0, 40)).await;
+            }
+            LedStatus::Driving { left, right } => {
+                // Green intensity based on speed
+                let intensity =
+                    ((left.unsigned_abs() as u16 + right.unsigned_abs() as u16) / 4) as u8;
+                led.set_color(Color::green(intensity.max(10))).await;
+            }
+            LedStatus::EmergencyStop => {
+                // Solid bright red
+                led.set_color(Color::red(50)).await;
+            }
+            LedStatus::TurnLeft => {
+                led.set_color(Color::new(25, 0, 25)).await; // Purple
+            }
+            LedStatus::TurnRight => {
+                led.set_color(Color::new(25, 25, 0)).await; // Yellow
+            }
+        }
+
+        // Blink rate depends on status
+        let delay = match current_status {
+            LedStatus::Scanning => Duration::from_millis(150),
+            LedStatus::Connecting => Duration::from_millis(200),
+            LedStatus::Disconnected => Duration::from_millis(500),
+            LedStatus::MotorsReady => Duration::from_millis(800),
+            _ => Duration::from_millis(100),
+        };
+        Timer::after(delay).await;
+    }
+}
 
 /// Motor control task
 #[allow(
@@ -52,20 +180,15 @@ static TIMER1_CELL: StaticCell<timer::Timer<'static, esp_hal::ledc::LowSpeed>> =
     reason = "async task with awaits needs stack space"
 )]
 #[embassy_executor::task]
-async fn motor_control_task(
-    mut drive: DriveTrain<'static>,
-    mut led: Ws2812<'static>,
-    turn_config: TurnConfig,
-) {
+async fn motor_control_task(mut drive: DriveTrain<'static>, turn_config: TurnConfig) {
     info!("Motor control task started");
-    led.set_color(Color::blue(10)).await;
 
     loop {
         let cmd = MOTOR_CMD_CHANNEL.receive().await;
 
         if cmd.flags.has(CommandFlags::EMERGENCY_STOP) {
             info!("Emergency stop!");
-            led.set_color(Color::red(50)).await;
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::EmergencyStop);
             drive.brake();
             Timer::after(Duration::from_millis(100)).await;
             continue;
@@ -73,7 +196,7 @@ async fn motor_control_task(
 
         if cmd.flags.has(CommandFlags::ABOUT_TURN_LEFT) {
             info!("About turn left");
-            led.set_color(Color::new(25, 0, 25)).await;
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::TurnLeft);
             drive.spin(-(turn_config.spin_speed as i8));
             Timer::after(Duration::from_millis(turn_config.turn_180_ms as u64)).await;
             drive.brake();
@@ -82,7 +205,7 @@ async fn motor_control_task(
 
         if cmd.flags.has(CommandFlags::ABOUT_TURN_RIGHT) {
             info!("About turn right");
-            led.set_color(Color::new(25, 25, 0)).await;
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::TurnRight);
             drive.spin(turn_config.spin_speed as i8);
             Timer::after(Duration::from_millis(turn_config.turn_180_ms as u64)).await;
             drive.brake();
@@ -91,11 +214,13 @@ async fn motor_control_task(
 
         if cmd.left == 0 && cmd.right == 0 {
             drive.stop();
-            led.set_color(Color::blue(10)).await;
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
         } else {
             drive.tank_drive(cmd.left, cmd.right);
-            let intensity = ((cmd.left.abs() + cmd.right.abs()) / 4) as u8;
-            led.set_color(Color::green(intensity.max(10))).await;
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Driving {
+                left: cmd.left,
+                right: cmd.right,
+            });
         }
     }
 }
@@ -120,6 +245,10 @@ async fn main(spawner: Spawner) -> ! {
 
     let led = Ws2812::new(peripherals.RMT, peripherals.GPIO21);
 
+    // Start LED status task immediately
+    spawner.spawn(led_status_task(led)).unwrap();
+    let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Booting);
+
     // ========== MOTOR SETUP ==========
     info!("Setting up motors...");
 
@@ -142,16 +271,85 @@ async fn main(spawner: Spawner) -> ! {
     let right_in2 = motor::output_pin(peripherals.GPIO5);
     let motor_right = Motor::new(right_in1, right_in2, pwm_right);
 
-    let drive = DriveTrain::new(motor_left, motor_right);
-
     let mut stby = StandbyPin::new(peripherals.GPIO7);
     stby.enable();
 
     info!("Motors ready!");
+    let _ = LED_STATUS_CHANNEL.try_send(LedStatus::MotorsReady);
+
+    // ========================================
+    // MOTOR TEST MODE
+    // ========================================
+    // Set to true to test motors without BLE (runs both at 50% forever)
+    let test_motors = false;
+
+    let mut drive = DriveTrain::new(motor_left, motor_right);
+
+    if test_motors {
+        info!("========================================");
+        info!("MOTOR TEST MODE - Running at 50% speed");
+        info!("========================================");
+
+        loop {
+            // Forward at 50%
+            info!("Forward 50%");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Driving {
+                left: 64,
+                right: 64,
+            });
+            drive.tank_drive(64, 64);
+            Timer::after(Duration::from_secs(5)).await;
+
+            // Stop
+            info!("Stop");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
+            drive.stop();
+            Timer::after(Duration::from_secs(5)).await;
+
+            // Reverse at 50%
+            info!("Reverse 50%");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Driving {
+                left: -64,
+                right: -64,
+            });
+            drive.tank_drive(-64, -64);
+            Timer::after(Duration::from_secs(2)).await;
+
+            // Stop
+            info!("Stop");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
+            drive.stop();
+            Timer::after(Duration::from_secs(1)).await;
+
+            // Spin left
+            info!("Spin left");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::TurnLeft);
+            drive.spin(-64);
+            Timer::after(Duration::from_secs(1)).await;
+
+            // Stop
+            info!("Stop");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
+            drive.stop();
+            Timer::after(Duration::from_secs(1)).await;
+
+            // Spin right
+            info!("Spin right");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::TurnRight);
+            drive.spin(64);
+            Timer::after(Duration::from_secs(1)).await;
+
+            // Stop
+            info!("Stop");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
+            drive.stop();
+            Timer::after(Duration::from_secs(1)).await;
+        }
+    }
 
     let turn_config = TurnConfig::default();
     spawner
-        .spawn(motor_control_task(drive, led, turn_config))
+        .spawn(motor_control_task(drive, turn_config))
         .unwrap();
 
     // ========== BLE SETUP ==========
@@ -201,7 +399,9 @@ async fn main(spawner: Spawner) -> ! {
     //   None => Scan mode (discovers nearby BLE devices)
     //   Some([0x2A, 0x86, 0x13, 0xD8, 0x17, 0xE4]) => E4:17:D8:13:86:2A (8BitDo)
     //
-    let target_addr: Option<[u8; 6]> = Some([0x90, 0xCA, 0x7D, 0x22, 0x16, 0x44]); //None; // <-- SET YOUR ADDRESS HERE or None to scan
+    // let target_addr: Option<[u8; 6]> = Some([0x90, 0xCA, 0x7D, 0x22, 0x16, 0x44]); //None; // <-- SET YOUR ADDRESS HERE or None to scan
+    // let target_addr: Option<[u8; 6]> = Some([0x25, 0x63, 0x0D, 0x68, 0x7B, 0xFF]);
+    let target_addr: Option<[u8; 6]> = None;
 
     if let Some(addr_bytes) = target_addr {
         // ========== CONNECTION MODE ==========
@@ -232,13 +432,16 @@ async fn main(spawner: Spawner) -> ! {
         let _ = join(runner.run(), async {
             loop {
                 info!("Scanning for gamepad...");
+                let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Scanning);
 
                 match central.connect(&connect_config).await {
                     Ok(conn) => {
                         info!("Connected to gamepad!");
+                        let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connecting);
 
                         match GattClient::<_, DefaultPacketPool, 10>::new(&stack, &conn).await {
                             Ok(client) => {
+                                let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
                                 let _ = join(client.task(), async {
                                     handle_gamepad(&client).await;
                                 })
@@ -250,9 +453,11 @@ async fn main(spawner: Spawner) -> ! {
                         }
 
                         info!("Gamepad disconnected");
+                        let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Disconnected);
                     }
                     Err(_) => {
                         info!("Connection failed, retrying...");
+                        let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Disconnected);
                     }
                 }
 
@@ -307,6 +512,7 @@ async fn main(spawner: Spawner) -> ! {
         };
 
         let mut scanner = Scanner::new(central);
+        let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Scanning);
 
         let _ = join(runner.run_with_handler(&printer), async {
             let config = ScanConfig {
@@ -382,53 +588,162 @@ async fn handle_gamepad<C: Controller, P: PacketPool>(client: &GattClient<'_, C,
             s.clone()
         }
         None => {
-            error!("No HID service found - wrong controller mode?");
-            error!("8BitDo Pro 2 modes:");
-            error!("  START+Y = Switch mode (BLE HID) <- USE THIS");
-            error!("  START+B = Android (may be Classic BT)");
-            error!("  START+X = Xbox mode");
-            error!("Try: Turn off, then START+Y for 3 seconds");
+            error!("No HID service found!");
+            error!("Xbox controller may require bonding first");
             return;
         }
     };
 
-    info!("Found HID service! Looking for Report characteristic...");
+    info!("Found HID service! Looking for Report characteristic (0x2A4D)...");
+
+    // HID Report UUID is 0x2A4D
+    let report_uuid = Uuid::new_short(0x2A4D);
 
     let report_char: Characteristic<Uuid> = match client
-        .characteristic_by_uuid(&hid_service, &HID_REPORT_UUID)
+        .characteristic_by_uuid(&hid_service, &report_uuid)
         .await
     {
-        Ok(c) => c,
+        Ok(c) => {
+            info!("  Found Report characteristic");
+            c
+        }
         Err(_) => {
-            error!("Failed to find Report characteristic");
+            error!("  Failed to find Report characteristic");
+            error!("Xbox controller likely requires BLE bonding/pairing");
+            error!("which isn't implemented. Try a different controller.");
             return;
         }
     };
 
-    info!("Found Report characteristic, subscribing...");
+    info!("Subscribing to Report characteristic (notifications)...");
 
     match client.subscribe(&report_char, true).await {
         Ok(mut listener) => {
-            info!("Subscribed! Move the left stick to drive.");
+            info!("========================================");
+            info!("Subscribe SUCCEEDED!");
+            info!("Waiting for HID notifications...");
+            info!("Move the controller sticks NOW!");
+            info!("========================================");
+
+            // Debug flag - set to true to log all raw input data
+            let log_controller_input = true;
 
             let mut last_state = GamepadState::default();
+            let mut packet_count: u32 = 0;
+            let mut got_first_packet = false;
 
             loop {
-                let notification = listener.next().await;
-                let data = notification.as_ref();
+                // Use select with timeout to detect if no data is coming
+                let timeout_duration = if got_first_packet {
+                    Duration::from_secs(30) // Long timeout after we get data
+                } else {
+                    Duration::from_secs(10) // Short timeout waiting for first packet
+                };
 
-                if let Some(state) = parse_generic_gamepad(data)
-                    && state_changed(&last_state, &state)
-                {
-                    debug!(
-                        "Stick: ({}, {}) Btn: {:04x}",
-                        state.left_x, state.left_y, state.buttons.0
-                    );
+                let result = select(listener.next(), Timer::after(timeout_duration)).await;
 
-                    let cmd = gamepad_to_motor_cmd(&state);
-                    let _ = MOTOR_CMD_CHANNEL.try_send(cmd);
+                match result {
+                    Either::First(notification) => {
+                        let data = notification.as_ref();
+                        packet_count += 1;
 
-                    last_state = state;
+                        if !got_first_packet {
+                            got_first_packet = true;
+                            info!("========================================");
+                            info!("GOT FIRST HID PACKET! Controller working!");
+                            info!("========================================");
+                        }
+
+                        // Flash LED on any input if debugging
+                        if log_controller_input {
+                            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::InputReceived);
+
+                            // Log raw data every 50 packets to avoid spam
+                            if packet_count % 50 == 1 {
+                                info!("Raw HID packet #{} (len={})", packet_count, data.len());
+                                // Print first 16 bytes
+                                if data.len() >= 16 {
+                                    info!(
+                                        "  [{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}]",
+                                        data[0],
+                                        data[1],
+                                        data[2],
+                                        data[3],
+                                        data[4],
+                                        data[5],
+                                        data[6],
+                                        data[7],
+                                        data[8],
+                                        data[9],
+                                        data[10],
+                                        data[11],
+                                        data[12],
+                                        data[13],
+                                        data[14],
+                                        data[15]
+                                    );
+                                } else {
+                                    info!("  Data: {:?}", &data[..data.len().min(16)]);
+                                }
+                            }
+                        }
+
+                        if let Some(state) = parse_generic_gamepad(data) {
+                            if log_controller_input && packet_count % 50 == 1 {
+                                info!(
+                                    "  Parsed: LX={} LY={} RX={} RY={} Btn={:04X}",
+                                    state.left_x,
+                                    state.left_y,
+                                    state.right_x,
+                                    state.right_y,
+                                    state.buttons.0
+                                );
+                            }
+
+                            if state_changed(&last_state, &state) {
+                                debug!(
+                                    "Stick: ({}, {}) Btn: {:04x}",
+                                    state.left_x, state.left_y, state.buttons.0
+                                );
+
+                                let cmd = gamepad_to_motor_cmd(&state);
+
+                                if log_controller_input {
+                                    info!(
+                                        "Motor cmd: L={} R={} flags={:02X}",
+                                        cmd.left, cmd.right, cmd.flags.0
+                                    );
+                                }
+
+                                let _ = MOTOR_CMD_CHANNEL.try_send(cmd);
+
+                                last_state = state;
+                            }
+                        } else if log_controller_input && packet_count % 50 == 1 {
+                            info!("  Parse failed - unknown format");
+                        }
+                    }
+                    Either::Second(_) => {
+                        // Timeout - no data received
+                        if !got_first_packet {
+                            error!("========================================");
+                            error!("TIMEOUT: No HID data received!");
+                            error!("========================================");
+                            error!("Xbox controller requires BLE BONDING");
+                            error!("which this firmware doesn't support.");
+                            error!("");
+                            error!("Try one of these controllers instead:");
+                            error!("  - 8BitDo Pro 2 (Switch mode: START+Y)");
+                            error!("  - 8BitDo Lite 2 ");
+                            error!("  - Generic BLE gamepad");
+                            error!("  - Nintendo Joy-Con");
+                            error!("========================================");
+                            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Disconnected);
+                            return;
+                        } else {
+                            info!("Input timeout - controller may have disconnected");
+                        }
+                    }
                 }
             }
         }
