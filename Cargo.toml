@@ -11,7 +11,7 @@ path = "./src/bin/main.rs"
 [dependencies]
 esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable"] }
 
-esp-rtos = { version = "0.2.0", features = [
+esp-rtos = { version = "0.2", features = [
   "defmt",
   "embassy",
   "esp-alloc",
@@ -19,29 +19,31 @@ esp-rtos = { version = "0.2.0", features = [
   "esp32s3",
 ] }
 
-defmt                  = "1.0.1"
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32s3"] }
+defmt                  = "1.0"
+esp-bootloader-esp-idf = { version = "0.4", features = ["defmt", "esp32s3"] }
 
-embassy-net = { version = "0.7.1", features = [
+embassy-net = { version = "0.7", features = [
   "defmt",
   "dhcpv4",
   "medium-ethernet",
   "tcp",
   "udp",
 ] }
-embedded-io = { version = "0.7.1", features = ["defmt"] }
-embedded-io-async = { version = "0.7.0", features = ["defmt"] }
-esp-alloc = { version = "0.9.0", features = ["defmt"] }
-esp-backtrace = { version = "0.18.1", features = [
+embedded-io = { version = "0.7", features = ["defmt"] }
+embedded-io-async = { version = "0.7", features = ["defmt"] }
+esp-alloc = { version = "0.9", features = ["defmt"] }
+esp-backtrace = { version = "0.18", features = [
   "defmt",
   "esp32s3",
   "panic-handler",
 ] }
 esp-println = { version = "0.16.1", features = ["defmt-espflash", "esp32s3"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
-bt-hci = "0.6.0"
-embassy-executor = { version = "0.9.1", features = ["defmt"] }
-embassy-time = { version = "0.5.0", features = ["defmt"] }
+bt-hci = "0.6"
+embassy-executor = { version = "0.9", features = ["defmt"] }
+embassy-futures = "0.1"
+embassy-sync = { version = "0.7", features = ["defmt"] }
+embassy-time = { version = "0.5", features = ["defmt"] }
 esp-radio = { version = "0.17.0", features = [
   "ble",
   "coex",
@@ -65,10 +67,10 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
   "socket-tcp",
   "socket-udp",
 ] }
-trouble-host = { version = "0.5.0", features = ["gatt"] }
+trouble-host = { version = "0.5", features = ["gatt", "central", "scan"] }
 
-critical-section = "1.2.0"
-static_cell      = "2.1.1"
+critical-section = "1.2"
+static_cell      = "2.1"
 
 
 [profile.dev]
