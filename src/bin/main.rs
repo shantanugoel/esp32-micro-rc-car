@@ -240,7 +240,9 @@ async fn motor_control_task(mut drive: DriveTrain<'static>, turn_config: TurnCon
         if cmd.flags.has(CommandFlags::ABOUT_TURN_LEFT) {
             info!("About turn left");
             let _ = LED_STATUS_CHANNEL.try_send(LedStatus::TurnLeft);
-            drive.spin(-(turn_config.spin_speed as i8));
+            // Use clamped spin speed to prevent brownouts
+            let spin = turn_config.clamp_speed(-(turn_config.spin_speed as i8));
+            drive.spin(spin);
             Timer::after(Duration::from_millis(turn_config.turn_180_ms as u64)).await;
             drive.brake();
             continue;
@@ -249,21 +251,24 @@ async fn motor_control_task(mut drive: DriveTrain<'static>, turn_config: TurnCon
         if cmd.flags.has(CommandFlags::ABOUT_TURN_RIGHT) {
             info!("About turn right");
             let _ = LED_STATUS_CHANNEL.try_send(LedStatus::TurnRight);
-            drive.spin(turn_config.spin_speed as i8);
+            // Use clamped spin speed to prevent brownouts
+            let spin = turn_config.clamp_speed(turn_config.spin_speed as i8);
+            drive.spin(spin);
             Timer::after(Duration::from_millis(turn_config.turn_180_ms as u64)).await;
             drive.brake();
             continue;
         }
 
-        if cmd.left == 0 && cmd.right == 0 {
+        // Clamp motor speeds to configured maximum to prevent current spikes
+        let left = turn_config.clamp_speed(cmd.left);
+        let right = turn_config.clamp_speed(cmd.right);
+
+        if left == 0 && right == 0 {
             drive.stop();
             let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
         } else {
-            drive.tank_drive(cmd.left, cmd.right);
-            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Driving {
-                left: cmd.left,
-                right: cmd.right,
-            });
+            drive.tank_drive(left, right);
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Driving { left, right });
         }
     }
 }

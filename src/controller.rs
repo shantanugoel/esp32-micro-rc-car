@@ -72,21 +72,33 @@ impl<'d> DriveTrain<'d> {
     }
 }
 
-/// Configurable spin/turn parameters
+/// Configurable spin/turn parameters and speed limits
 #[derive(Clone, Copy)]
 pub struct TurnConfig {
     /// Speed for spinning (0-100)
     pub spin_speed: u8,
     /// Duration in milliseconds for a 180° turn (calibrate this!)
     pub turn_180_ms: u32,
+    /// Maximum motor speed (0-127) - limits current draw to prevent brownouts
+    /// Set lower if the board reboots during high-speed operation
+    pub max_speed: u8,
 }
 
 impl Default for TurnConfig {
     fn default() -> Self {
         Self {
-            spin_speed: 60,
-            turn_180_ms: 500, // Start with 500ms, calibrate on real hardware
+            spin_speed: 40,   // Reduced from 60 - safer for small batteries
+            turn_180_ms: 600, // Slightly longer to compensate for lower speed
+            max_speed: 50,    // 50% max - prevents current spikes that cause brownouts
         }
+    }
+}
+
+impl TurnConfig {
+    /// Clamp a speed value to the configured maximum
+    pub fn clamp_speed(&self, speed: i8) -> i8 {
+        let max = self.max_speed as i8;
+        speed.clamp(-max, max)
     }
 }
 
