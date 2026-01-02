@@ -7,10 +7,11 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use bt_hci::controller::ExternalController;
+use bt_hci::cmd::le::LeSetScanParams;
+use bt_hci::controller::{ControllerCmdSync, ExternalController};
 use bt_hci::param::{AddrKind, BdAddr};
 use core::cell::RefCell;
-use defmt::{debug, error, info};
+use defmt::{debug, error, info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_futures::select::{Either, select};
@@ -39,6 +40,18 @@ const L2CAP_CHANNELS_MAX: usize = 3;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+// ========================================
+// CONTROL MODE SELECTION
+// ========================================
+/// Control mode for the RC car
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ControlMode {
+    /// Web Bluetooth mode - ESP32 acts as peripheral, controlled from web browser
+    WebBle,
+    /// Gamepad mode - ESP32 connects to BLE gamepad as central
+    Gamepad,
+}
+
 /// Channel for motor commands
 static MOTOR_CMD_CHANNEL: Channel<CriticalSectionRawMutex, MotorCommand, 4> = Channel::new();
 
@@ -52,6 +65,8 @@ enum LedStatus {
     Booting,
     /// Motors ready, waiting for BLE - cyan pulse
     MotorsReady,
+    /// Advertising (Web BLE mode) - blue pulse
+    Advertising,
     /// Scanning for gamepad - blue blink
     Scanning,
     /// Connecting to gamepad - yellow blink
@@ -107,6 +122,12 @@ async fn led_status_task(mut led: Ws2812<'static>) {
                 // Cyan pulse
                 let intensity = if blink_on { 20 } else { 5 };
                 led.set_color(Color::new(0, intensity, intensity)).await;
+                blink_on = !blink_on;
+            }
+            LedStatus::Advertising => {
+                // Blue pulse (slower, inviting)
+                let intensity = if blink_on { 25 } else { 8 };
+                led.set_color(Color::new(0, 0, intensity)).await;
                 blink_on = !blink_on;
             }
             LedStatus::Scanning => {
@@ -168,6 +189,7 @@ async fn led_status_task(mut led: Ws2812<'static>) {
             LedStatus::Connecting => Duration::from_millis(200),
             LedStatus::Disconnected => Duration::from_millis(500),
             LedStatus::MotorsReady => Duration::from_millis(800),
+            LedStatus::Advertising => Duration::from_millis(600),
             _ => Duration::from_millis(100),
         };
         Timer::after(delay).await;
@@ -352,6 +374,13 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(motor_control_task(drive, turn_config))
         .unwrap();
 
+    // ========================================
+    // CONTROL MODE SELECTION
+    // ========================================
+    // WebBle = Control from web browser (ESP32 advertises, browser connects)
+    // Gamepad = Connect to BLE gamepad (ESP32 scans and connects)
+    let control_mode = ControlMode::WebBle; // <-- CHANGE THIS TO SWITCH MODES
+
     // ========== BLE SETUP ==========
     info!("Initializing BLE...");
 
@@ -368,7 +397,211 @@ async fn main(spawner: Spawner) -> ! {
         HostResources::new();
 
     let address = Address::random([0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x01]);
-    let stack = trouble_host::new(ble_controller, &mut resources).set_random_address(address);
+
+    match control_mode {
+        ControlMode::WebBle => {
+            run_web_ble_mode(ble_controller, &mut resources, address).await;
+        }
+        ControlMode::Gamepad => {
+            run_gamepad_mode(ble_controller, &mut resources, address).await;
+        }
+    }
+
+    loop {
+        Timer::after(Duration::from_secs(1)).await;
+    }
+}
+
+// ========================================
+// WEB BLE MODE (Peripheral)
+// ========================================
+// Custom service UUID for RC car control
+// Service UUID: 19b10000-e8f2-537e-4f6c-d104768a1214
+// Motor Char:   19b10001-e8f2-537e-4f6c-d104768a1214
+
+/// Motor control service for RC car
+#[gatt_service(uuid = "19b10000-e8f2-537e-4f6c-d104768a1214")]
+struct RcCarService {
+    /// Motor control: 2 bytes [left_speed: i8, right_speed: i8]
+    #[characteristic(
+        uuid = "19b10001-e8f2-537e-4f6c-d104768a1214",
+        write,
+        write_without_response
+    )]
+    motor_control: [u8; 2],
+}
+
+/// GATT server containing our RC car service
+#[gatt_server]
+struct RcCarServer {
+    rc_service: RcCarService,
+}
+
+#[allow(clippy::large_stack_frames)]
+async fn run_web_ble_mode<C: Controller>(
+    controller: C,
+    resources: &mut HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX>,
+    address: Address,
+) {
+    info!("========================================");
+    info!("WEB BLE MODE - Browser Control");
+    info!("========================================");
+    info!("1. Open web/index.html in Chrome/Edge");
+    info!("2. Click 'Connect to Car'");
+    info!("3. Select 'ESP32-RC-Car'");
+    info!("4. Use joystick to drive!");
+    info!("========================================");
+    info!("");
+
+    let stack = trouble_host::new(controller, resources).set_random_address(address);
+
+    let Host {
+        mut peripheral,
+        mut runner,
+        ..
+    } = stack.build();
+
+    // Create GATT server with GAP service
+    let server: RcCarServer<'_> =
+        RcCarServer::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+            name: "ESP32-RC-Car",
+            appearance: &appearance::UNKNOWN,
+        }))
+        .expect("Failed to create GATT server");
+
+    info!("GATT server created");
+    info!("Service UUID: 19b10000-e8f2-537e-4f6c-d104768a1214");
+    info!("Motor Char:   19b10001-e8f2-537e-4f6c-d104768a1214");
+
+    let _ = join(runner.run(), async {
+        loop {
+            info!("Starting advertising as 'ESP32-RC-Car'...");
+            let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Advertising);
+
+            // Build advertising data
+            let mut adv_data = [0u8; 31];
+            let adv_len = AdStructure::encode_slice(
+                &[
+                    AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                    AdStructure::CompleteLocalName(b"ESP32-RC-Car"),
+                ],
+                &mut adv_data[..],
+            )
+            .unwrap_or(0);
+
+            // Build scan response (empty since 128-bit service UUIDs are long)
+            let scan_data = [0u8; 31];
+            let scan_len = 0;
+
+            let adv = Advertisement::ConnectableScannableUndirected {
+                adv_data: &adv_data[..adv_len],
+                scan_data: &scan_data[..scan_len],
+            };
+
+            match peripheral.advertise(&Default::default(), adv).await {
+                Ok(advertiser) => {
+                    info!("Advertising started, waiting for connection...");
+
+                    match advertiser.accept().await {
+                        Ok(accept_result) => {
+                            match accept_result.with_attribute_server(&server) {
+                                Ok(conn) => {
+                                    info!("========================================");
+                                    info!("Web browser connected!");
+                                    info!("========================================");
+                                    let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Connected);
+
+                                    // Handle GATT events
+                                    handle_gatt_events(&server, &conn).await;
+
+                                    info!("Browser disconnected");
+                                    let _ = LED_STATUS_CHANNEL.try_send(LedStatus::Disconnected);
+
+                                    // Stop motors on disconnect
+                                    let _ = MOTOR_CMD_CHANNEL.try_send(MotorCommand::default());
+                                }
+                                Err(_e) => {
+                                    warn!("Failed to set up GATT server");
+                                }
+                            }
+                        }
+                        Err(_e) => {
+                            warn!("Accept failed");
+                        }
+                    }
+                }
+                Err(_e) => {
+                    error!("Advertising failed");
+                }
+            }
+
+            Timer::after(Duration::from_millis(500)).await;
+        }
+    })
+    .await;
+}
+
+/// Handle GATT events and motor commands from Web BLE
+#[allow(clippy::large_stack_frames)]
+async fn handle_gatt_events<'a>(
+    server: &RcCarServer<'a>,
+    conn: &GattConnection<'a, '_, DefaultPacketPool>,
+) {
+    info!("Waiting for motor commands...");
+
+    loop {
+        match conn.next().await {
+            GattConnectionEvent::Disconnected { reason } => {
+                info!("Disconnected: {:?}", reason);
+                break;
+            }
+            GattConnectionEvent::Gatt {
+                event: GattEvent::Write(write_event),
+            } => {
+                // Check if this is a write to our motor characteristic
+                if write_event.handle() == server.rc_service.motor_control.handle {
+                    // Get the data from the server
+                    if let Ok(data) = server.get(&server.rc_service.motor_control) {
+                        let left = data[0] as i8;
+                        let right = data[1] as i8;
+
+                        debug!("Web BLE cmd: L={} R={}", left, right);
+
+                        let cmd = MotorCommand {
+                            left,
+                            right,
+                            flags: CommandFlags(0),
+                        };
+
+                        let _ = MOTOR_CMD_CHANNEL.try_send(cmd);
+                        let _ = LED_STATUS_CHANNEL.try_send(if left == 0 && right == 0 {
+                            LedStatus::Connected
+                        } else {
+                            LedStatus::Driving { left, right }
+                        });
+                    }
+                }
+
+                // Accept the write
+                if let Ok(reply) = write_event.accept() {
+                    reply.send().await;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ========================================
+// GAMEPAD MODE (Central)
+// ========================================
+#[allow(clippy::large_stack_frames)]
+async fn run_gamepad_mode<C: Controller + ControllerCmdSync<LeSetScanParams>>(
+    controller: C,
+    resources: &mut HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX>,
+    address: Address,
+) {
+    let stack = trouble_host::new(controller, resources).set_random_address(address);
 
     let Host {
         mut central,

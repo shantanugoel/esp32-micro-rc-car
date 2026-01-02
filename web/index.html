@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>ESP32 RC Car Controller</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            touch-action: manipulation;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 1.5em;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .status.disconnected {
+            background: rgba(255, 0, 0, 0.3);
+            border: 2px solid #f44;
+        }
+
+        .status.connecting {
+            background: rgba(255, 200, 0, 0.3);
+            border: 2px solid #fc0;
+        }
+
+        .status.connected {
+            background: rgba(0, 255, 0, 0.3);
+            border: 2px solid #0f0;
+        }
+
+        .connect-btn {
+            width: 100%;
+            padding: 15px;
+            font-size: 1.2em;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: all 0.2s;
+        }
+
+        .connect-btn.connect {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .connect-btn.disconnect {
+            background: #f44336;
+            color: white;
+        }
+
+        .connect-btn:active {
+            transform: scale(0.98);
+        }
+
+        .connect-btn:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+
+        .joystick-container {
+            display: flex;
+            justify-content: center;
+            margin: 20px 0;
+        }
+
+        .joystick {
+            width: 250px;
+            height: 250px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            position: relative;
+            touch-action: none;
+        }
+
+        .joystick-knob {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(145deg, #4CAF50, #45a049);
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            transition: background 0.1s;
+        }
+
+        .joystick-knob.active {
+            background: linear-gradient(145deg, #66BB6A, #4CAF50);
+        }
+
+        .joystick-crosshair {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .joystick-crosshair.horizontal {
+            width: 100%;
+            height: 2px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .joystick-crosshair.vertical {
+            width: 2px;
+            height: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .control-btn {
+            padding: 15px;
+            font-size: 1em;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.1s;
+        }
+
+        .control-btn:active {
+            transform: scale(0.95);
+        }
+
+        .spin-left {
+            background: #9C27B0;
+            color: white;
+        }
+
+        .spin-right {
+            background: #FF9800;
+            color: white;
+        }
+
+        .stop-btn {
+            grid-column: span 2;
+            background: #f44336;
+            color: white;
+            font-size: 1.3em;
+            padding: 20px;
+        }
+
+        .debug {
+            margin-top: 20px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+
+        .debug-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .instructions {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-size: 0.9em;
+        }
+
+        .instructions h3 {
+            margin-top: 0;
+        }
+
+        .instructions ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+
+        .not-supported {
+            background: rgba(255, 0, 0, 0.3);
+            border: 2px solid #f44;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🚗 ESP32 RC Car</h1>
+
+        <div id="not-supported" class="not-supported" style="display: none;">
+            <h3>⚠️ Web Bluetooth Not Supported</h3>
+            <p>Your browser doesn't support Web Bluetooth.</p>
+            <p>Please use:</p>
+            <ul style="text-align: left;">
+                <li>Chrome (desktop or Android)</li>
+                <li>Edge (desktop)</li>
+                <li>Opera</li>
+            </ul>
+            <p><strong>Note:</strong> iOS Safari doesn't support Web Bluetooth.</p>
+        </div>
+
+        <div id="main-ui">
+            <div id="status" class="status disconnected">Disconnected</div>
+
+            <button id="connectBtn" class="connect-btn connect">Connect to Car</button>
+
+            <div class="joystick-container">
+                <div id="joystick" class="joystick">
+                    <div class="joystick-crosshair horizontal"></div>
+                    <div class="joystick-crosshair vertical"></div>
+                    <div id="knob" class="joystick-knob"></div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button id="spinLeft" class="control-btn spin-left">↺ Spin Left</button>
+                <button id="spinRight" class="control-btn spin-right">Spin Right ↻</button>
+                <button id="stopBtn" class="control-btn stop-btn">🛑 STOP</button>
+            </div>
+
+            <div class="debug">
+                <div class="debug-row">
+                    <span>Joystick X:</span>
+                    <span id="debug-x">0</span>
+                </div>
+                <div class="debug-row">
+                    <span>Joystick Y:</span>
+                    <span id="debug-y">0</span>
+                </div>
+                <div class="debug-row">
+                    <span>Left Motor:</span>
+                    <span id="debug-left">0</span>
+                </div>
+                <div class="debug-row">
+                    <span>Right Motor:</span>
+                    <span id="debug-right">0</span>
+                </div>
+            </div>
+
+            <div class="instructions">
+                <h3>Instructions</h3>
+                <ul>
+                    <li>Click "Connect" and select "ESP32-RC-Car"</li>
+                    <li>Drag the joystick to drive</li>
+                    <li>Up = Forward, Down = Reverse</li>
+                    <li>Left/Right = Turn while moving</li>
+                    <li>Spin buttons = Turn in place</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // BLE UUIDs - must match ESP32 firmware
+        const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+        const MOTOR_CHAR_UUID = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
+        // BLE state
+        let device = null;
+        let server = null;
+        let motorCharacteristic = null;
+        let isConnected = false;
+
+        // Joystick state
+        let joystickX = 0;
+        let joystickY = 0;
+        let isDragging = false;
+        let sendInterval = null;
+
+        // DOM elements
+        const statusEl = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const joystickEl = document.getElementById('joystick');
+        const knobEl = document.getElementById('knob');
+        const spinLeftBtn = document.getElementById('spinLeft');
+        const spinRightBtn = document.getElementById('spinRight');
+        const stopBtn = document.getElementById('stopBtn');
+
+        // Check Web Bluetooth support
+        if (!navigator.bluetooth) {
+            document.getElementById('not-supported').style.display = 'block';
+            document.getElementById('main-ui').style.display = 'none';
+        }
+
+        // Update status display
+        function updateStatus(status, className) {
+            statusEl.textContent = status;
+            statusEl.className = 'status ' + className;
+        }
+
+        // Connect to BLE device
+        async function connect() {
+            try {
+                updateStatus('Scanning...', 'connecting');
+                connectBtn.disabled = true;
+
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'ESP32-RC-Car' }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+
+                updateStatus('Connecting...', 'connecting');
+                server = await device.gatt.connect();
+
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                motorCharacteristic = await service.getCharacteristic(MOTOR_CHAR_UUID);
+
+                isConnected = true;
+                updateStatus('Connected!', 'connected');
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.className = 'connect-btn disconnect';
+                connectBtn.disabled = false;
+
+                // Start sending commands at 20Hz
+                sendInterval = setInterval(sendMotorCommand, 50);
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateStatus('Connection failed: ' + error.message, 'disconnected');
+                connectBtn.disabled = false;
+                onDisconnected();
+            }
+        }
+
+        // Disconnect from BLE device
+        function disconnect() {
+            if (device && device.gatt.connected) {
+                device.gatt.disconnect();
+            }
+            onDisconnected();
+        }
+
+        // Handle disconnection
+        function onDisconnected() {
+            isConnected = false;
+            motorCharacteristic = null;
+            server = null;
+
+            if (sendInterval) {
+                clearInterval(sendInterval);
+                sendInterval = null;
+            }
+
+            updateStatus('Disconnected', 'disconnected');
+            connectBtn.textContent = 'Connect to Car';
+            connectBtn.className = 'connect-btn connect';
+            connectBtn.disabled = false;
+        }
+
+        // Convert joystick to tank drive
+        function joystickToMotors(x, y) {
+            // x: -127 to 127 (left/right)
+            // y: -127 to 127 (forward/backward, negative = forward)
+
+            // Arcade to tank drive conversion
+            let left = -y + x;
+            let right = -y - x;
+
+            // Clamp to -127 to 127
+            left = Math.max(-127, Math.min(127, left));
+            right = Math.max(-127, Math.min(127, right));
+
+            return { left: Math.round(left), right: Math.round(right) };
+        }
+
+        // Send motor command over BLE
+        async function sendMotorCommand() {
+            if (!isConnected || !motorCharacteristic) return;
+
+            const motors = joystickToMotors(joystickX, joystickY);
+
+            // Update debug display
+            document.getElementById('debug-x').textContent = joystickX;
+            document.getElementById('debug-y').textContent = joystickY;
+            document.getElementById('debug-left').textContent = motors.left;
+            document.getElementById('debug-right').textContent = motors.right;
+
+            // Send as two signed bytes: [left, right]
+            const data = new Int8Array([motors.left, motors.right]);
+
+            try {
+                await motorCharacteristic.writeValueWithoutResponse(data);
+            } catch (error) {
+                console.error('Send error:', error);
+            }
+        }
+
+        // Send special command (spin, stop)
+        async function sendSpecialCommand(left, right) {
+            if (!isConnected || !motorCharacteristic) return;
+
+            const data = new Int8Array([left, right]);
+
+            try {
+                await motorCharacteristic.writeValueWithoutResponse(data);
+            } catch (error) {
+                console.error('Send error:', error);
+            }
+        }
+
+        // Joystick handling
+        function handleJoystickStart(e) {
+            e.preventDefault();
+            isDragging = true;
+            knobEl.classList.add('active');
+            handleJoystickMove(e);
+        }
+
+        function handleJoystickMove(e) {
+            if (!isDragging) return;
+            e.preventDefault();
+
+            const rect = joystickEl.getBoundingClientRect();
+            const centerX = rect.width / 2;
+            const centerY = rect.height / 2;
+            const maxRadius = rect.width / 2 - 40; // Knob radius
+
+            let clientX, clientY;
+            if (e.touches) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            let x = clientX - rect.left - centerX;
+            let y = clientY - rect.top - centerY;
+
+            // Limit to circle
+            const distance = Math.sqrt(x * x + y * y);
+            if (distance > maxRadius) {
+                x = (x / distance) * maxRadius;
+                y = (y / distance) * maxRadius;
+            }
+
+            // Update knob position
+            knobEl.style.left = (centerX + x) + 'px';
+            knobEl.style.top = (centerY + y) + 'px';
+
+            // Convert to -127 to 127 range
+            joystickX = Math.round((x / maxRadius) * 127);
+            joystickY = Math.round((y / maxRadius) * 127);
+        }
+
+        function handleJoystickEnd(e) {
+            e.preventDefault();
+            isDragging = false;
+            knobEl.classList.remove('active');
+
+            // Return to center
+            const rect = joystickEl.getBoundingClientRect();
+            knobEl.style.left = '50%';
+            knobEl.style.top = '50%';
+
+            joystickX = 0;
+            joystickY = 0;
+        }
+
+        // Event listeners
+        connectBtn.addEventListener('click', () => {
+            if (isConnected) {
+                disconnect();
+            } else {
+                connect();
+            }
+        });
+
+        // Joystick events
+        joystickEl.addEventListener('mousedown', handleJoystickStart);
+        joystickEl.addEventListener('touchstart', handleJoystickStart);
+        document.addEventListener('mousemove', handleJoystickMove);
+        document.addEventListener('touchmove', handleJoystickMove, { passive: false });
+        document.addEventListener('mouseup', handleJoystickEnd);
+        document.addEventListener('touchend', handleJoystickEnd);
+
+        // Button events
+        spinLeftBtn.addEventListener('mousedown', () => sendSpecialCommand(-80, 80));
+        spinLeftBtn.addEventListener('touchstart', (e) => { e.preventDefault(); sendSpecialCommand(-80, 80); });
+        spinLeftBtn.addEventListener('mouseup', () => sendSpecialCommand(0, 0));
+        spinLeftBtn.addEventListener('touchend', () => sendSpecialCommand(0, 0));
+
+        spinRightBtn.addEventListener('mousedown', () => sendSpecialCommand(80, -80));
+        spinRightBtn.addEventListener('touchstart', (e) => { e.preventDefault(); sendSpecialCommand(80, -80); });
+        spinRightBtn.addEventListener('mouseup', () => sendSpecialCommand(0, 0));
+        spinRightBtn.addEventListener('touchend', () => sendSpecialCommand(0, 0));
+
+        stopBtn.addEventListener('click', () => {
+            joystickX = 0;
+            joystickY = 0;
+            sendSpecialCommand(0, 0);
+        });
+    </script>
+</body>
+
+</html>
