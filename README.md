@@ -12,13 +12,20 @@ A BLE-controlled 4WD RC car built with ESP32-S3 and written in Rust. Control it 
 - TB6612FNG motor driver
 - 4x 716 coreless motors (3.7V)
 - 3.7V Li-Po battery
+- A Li-Po battery charger (Optional)
+    - I used a clone of the Adafruit Micro-Lipo charger
+    - Can also use much cheaper TP4056 based ones which are available for $0.1 or INR10 or so. But need to take care of charging current with them.
+- Switch to turn the car on/off (Optional)
 
 ## Wiring
 
+### Notes
+- You can simplify the connections further by:
+    - tying battery `+` together with Vm of motor driver and 5V pin of ESP32.
+    - tying battery `-` together with GND of motor driver and GND of ESP32.
+- Lipo charger and on/off switch are not shown in the circuit. You can add the charger to battery terminals and charger output as below. And a switch can be optionally added to ESP32 5v input.
+
 ![Circuit Diagram](esp32-micro-rc-car-connections.png)
-You can simplify the connections further by:
-- tying battery `+` together with Vm of motor driver and 5V pin of ESP32.
-- tying battery `-` together with GND of motor driver and GND of ESP32.
 
 ## Building and Flashing
 
